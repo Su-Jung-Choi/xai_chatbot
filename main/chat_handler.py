@@ -1,10 +1,4 @@
 # main/chat_handler.py
-import os
-
-print("Current working directory:", os.getcwd())
-# this is for absolute path to the project root
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-print("Project root path:", PROJECT_ROOT)
 import json
 import logging
 import re
@@ -13,33 +7,44 @@ from utils.data_utils import *
 from myapp.model_manager import *
 from myapp.explanation_engine import ExplanationEngine
 from sklearn.model_selection import train_test_split
+from myapp.model_manager import load_and_prepare_external_sample
+from myapp.method_registry import user_help_text
 
-# Convert matplotlib Figure to PIL Image
-import io
-from PIL import Image
-import base64
-import matplotlib.pyplot as plt
+HELP_TRIGGERS = {
+    "help",
+    "what can you do",
+    "what can i do",
+    "what can i ask",
+    "how do i use this",
+    "how to use this",
+    "instructions",
+    "guide",
+    "manual",
+}
 
 
-# --- Helper to extract JSON from LLM output ---
+def handle_help(user_input: str) -> str | None:
+    """
+    handle_help function is to provide a guide to user about how to use the chatbot.
+    If the user asks for help/capabilities, return a friendly guide.
+    Otherwise, return None, so normal routing continues.
+    """
+    text = (user_input or "").strip().lower()
+    if any(trigger in text for trigger in HELP_TRIGGERS):
+        return user_help_text()
+    return None
+
+
 def extract_json_from_llm(llm_response):
+    """
+    extract_json_from_llm function is to extract JSON from the LLM response.
+    """
     llm_response = llm_response.strip()
     llm_response = re.sub(r"^```.*?\n", "", llm_response)  # remove start ```json or ```
     llm_response = re.sub(r"\n```$", "", llm_response)  # remove end ```
     return llm_response
 
 
-def load_test_sample(test_sample_path):
-    # If only a file name is provided, currently assuming it's in test_set/
-    if not os.path.isabs(test_sample_path):
-        abs_path = os.path.join(PROJECT_ROOT, test_sample_path)
-    else:
-        abs_path = test_sample_path
-    print("Loading test sample from:", abs_path)
-    return pd.read_csv(abs_path)
-
-
-# --- Main handler ---
 def handle_user_input(
     user_input,
     conversation_history,
@@ -54,6 +59,15 @@ def handle_user_input(
     label_column,  # Label column string (must be present)
     state,  # The full session state dict for updating as needed
 ):
+    """
+    handle_user_input function is the main entry point for processing user input.
+    """
+    # check if the user asks for help and provide the guide without sending it to the LLM
+    help_text = handle_help(user_input)
+    if help_text is not None:
+        # Return the help text directly; no figures/images for help
+        return help_text, None
+
     # Prepare the agentic prompt for the LLM
     history_prompt = ""
     for msg in conversation_history:
@@ -75,7 +89,7 @@ def handle_user_input(
             None,
         )  # initialize response and image so when there is no image returned from the functions, this will prevent errors
 
-        # --- Data exploration ---
+        # Data exploration methods
         if method == "describe_data":
             response = get_dataset_description(df, label_column)
         elif method == "basic_stats":
@@ -92,7 +106,7 @@ def handle_user_input(
                 fig_or_img = plot_feature_distribution(df, feature)
                 response = f"Distribution plot for '{feature}':"
 
-        # --- Model training & management ---
+        # Model training & management methods
         elif method == "train_model":
             model_type = decision.get("model_type")
             if not model_type:
@@ -174,7 +188,7 @@ def handle_user_input(
                 else:
                     response = f"Model '{model_type.upper()}' not found or could not be deleted."
 
-        # --- Model evaluation ---
+        # Model evaluation and visualization methods
         elif method == "evaluate_model":
             if not model or X_test is None or y_test is None:
                 response = "Please train or load a model first."
@@ -225,6 +239,7 @@ def handle_user_input(
                 or instance_idx >= len(state["X_encoded"])
             ):
                 response = f"Please provide a valid instance index (0 - {len(state['X_encoded'])-1})."
+
             else:  # when the user asks for a specific instance index
                 response = predict_instance_label(
                     model, state["X_encoded"], state["y"], df, instance_idx=instance_idx
@@ -250,7 +265,7 @@ def handle_user_input(
                 except Exception as e:
                     response = f"ROC AUC plotting failed: {e}"
 
-        # --- XAI explanation ---
+        # XAI explanation methods
         elif method in ["shap", "lime", "dice"]:
             instance_idx = decision.get("instance_idx")
             test_sample_path = decision.get("test_sample_path")
@@ -259,8 +274,6 @@ def handle_user_input(
                 # (Re)build explainer on demand for current model
                 X = state["X_encoded"]
                 y = state["y"]
-                # print("model in state: ", state["model"])
-                # print("explainer in state: ", state["explainer"])
 
                 # For one-hot, categorical_features should be defined here
                 state["explainer"] = ExplanationEngine(
@@ -268,117 +281,68 @@ def handle_user_input(
                     X=X,
                     y=y,
                     feature_names=list(X.columns),
-                    categorical_features=[],  # NOTE: this needs to be set correctly - i need to handle how to infer this
+                    categorical_features=[],  # NOTE: for future enhancement, this needs to be set correctly
                     class_names=list(map(str, sorted(np.unique(y)))),
                 )
             explainer = state["explainer"]
             if not model:
                 response = "Please train or load a model first."
             elif test_sample_path:
-                test_df = load_test_sample(test_sample_path)
-                if test_df.shape[0] != 1:
-                    response = f"Test sample must contain exactly one row. Found {test_df.shape[0]} rows."
-                else:
-                    cat_cols = [
-                        c
-                        for c in test_df.columns
-                        if test_df[c].dtype == "object"
-                        or test_df[c].dtype.name == "category"
-                    ]
-                    label_column = state.get("label_column")
-                    if label_column and label_column in test_df.columns:
-                        test_df = test_df.drop(columns=[label_column])
-                    # one-hot encode to match training columns
-                    test_encoded = pd.get_dummies(test_df, columns=cat_cols)
-                    test_encoded = test_encoded.reindex(
-                        columns=state["X_encoded"].columns, fill_value=0
-                    )
-                    # use only row 0 when the test sample is provided
-                    if method == "shap":
-                        explanation_result = explainer.shap_explainer(test_encoded)
-                        prompt_content = build_instance_xai_prompt(
-                            0,  # for test sample, always index 0
-                            model,
-                            explainer,
-                            state,
-                            test_df,  # for user-friendly display
-                            method,
-                            explanation_result,
-                            pred_label=model.predict(test_encoded)[0],
-                            actual_label=None,
-                            test_sample_path=test_sample_path,
+                try:
+                    test_row, test_encoded_df, test_row_np = (
+                        load_and_prepare_external_sample(
+                            test_sample_path,
+                            training_columns=list(state["X_encoded"].columns),
+                            label_column=state.get("label_column"),
                         )
+                    )
+                except Exception as e:
+                    response = f"Could not process test sample: {e}"
+                else:
+                    pred_label = model.predict(test_encoded_df)[0]
+                    actual_label = None  # external sample has no ground truth
+
+                    if method == "shap":
+                        explanation_result = explainer.explain_with_shap_row(
+                            test_row_np, feature_names=list(state["X_encoded"].columns)
+                        )
+
                     elif method == "lime":
                         explanation_result = explainer.lime_explainer.explain_instance(
-                            data_row=test_encoded.iloc[0],
+                            data_row=test_row_np[0],
                             predict_fn=model.predict_proba,
                             num_features=5,  # default to 5 features
                         ).as_list()
-                        prompt_content = build_instance_xai_prompt(
-                            0,  # for test sample, always index 0
-                            model,
-                            explainer,
-                            state,
-                            test_df,  # for user-friendly display
-                            method,
-                            explanation_result,
-                            pred_label=model.predict(test_encoded)[0],
-                            actual_label=None,
-                            test_sample_path=test_sample_path,
-                        )
+
                     elif method == "dice":
-                        explanation_result = explainer.generate_counterfactuals(
-                            test_encoded, total_CFs=3
+                        explanation_result = explainer.dice.generate_counterfactuals(
+                            test_encoded_df, total_CFs=3
                         )
-                        prompt_content = build_instance_xai_prompt(
-                            0,  # for test sample, always index 0
-                            model,
-                            explainer,
-                            state,
-                            test_df,  # for user-friendly display
-                            method,
-                            explanation_result,
-                            pred_label=model.predict(test_encoded)[0],
-                            actual_label=None,
-                            test_sample_path=test_sample_path,
-                        )
+                    prompt_content = build_instance_xai_prompt(
+                        0,  # for test sample, always index 0
+                        model,
+                        explainer,
+                        state,
+                        test_row,  # for user-friendly display
+                        method,
+                        explanation_result,
+                        pred_label=pred_label,
+                        actual_label=actual_label,
+                        test_sample_path=test_sample_path,
+                    )
                     response = llm_client.query(
                         llm_client.format_explanation_prompt(user_input, prompt_content)
                     )
             elif instance_idx is None or instance_idx >= len(df):
                 response = f"Please provide a valid instance index (0 - {len(df)-1})."
 
-            else:  # when the user asks for a specific instance index within the dataset
+            else:  # when the user asks for a specific instance index within the main dataset
                 # Handle each XAI method
                 if method == "shap":
                     explanation_result = explainer.explain_with_shap(instance_idx)
-                    # prompt_content = build_instance_xai_prompt(
-                    #     instance_idx,
-                    #     model,
-                    #     explainer,
-                    #     state,
-                    #     df,
-                    #     method,
-                    #     explanation_result,
-                    # )
-                    # response = llm_client.query(
-                    #     llm_client.format_explanation_prompt(user_input, prompt_content)
-                    # )
 
                 elif method == "lime":
                     explanation_result = explainer.explain_with_lime(instance_idx)
-                    # prompt_content = build_instance_xai_prompt(
-                    #     instance_idx,
-                    #     model,
-                    #     explainer,
-                    #     state,
-                    #     df,
-                    #     method,
-                    #     explanation_result,
-                    # )
-                    # response = llm_client.query(
-                    #     llm_client.format_explanation_prompt(user_input, prompt_content)
-                    # )
 
                 elif method == "dice":  # dice requires original instance and cf table
                     explanation_result = explainer.generate_counterfactuals(
@@ -468,37 +432,47 @@ def build_instance_xai_prompt(
     actual_label=None,
     test_sample_path=None,
 ):
-    # this function is to build a prompt for LLM to explain the instance,
-    # which also include the predicted vs actual label and original instance values
-    pred_label = model.predict([explainer.X.iloc[instance_idx]])[0]
-    actual_label = state["y"].iloc[instance_idx]
+    """
+    build_instance_xai_prompt function constructs a prompt for the LLM to explain a specific instance.
+    It includes the predicted vs actual label and original instance values.
+    """
+
     original_instance = df.iloc[instance_idx]
     instance_details = "\n".join(
         f"{col}: {val}" for col, val in original_instance.items()
     )
-    prompt_content = f"Instance details (index {instance_idx}"
-    if test_sample_path:
-        prompt_content += f", from file: {test_sample_path}"
-    prompt_content += "):\n"
-    prompt_content += instance_details + "\n"
+
+    # fallbacks only for main dataset case
+    if pred_label is None and df is state.get("df"):
+        pred_label = model.predict([explainer.X.iloc[instance_idx]])[0]
+    if actual_label is None and df is state.get("df"):
+        actual_label = state["y"].iloc[instance_idx]
+
+    # header varies by source (dataset vs external file)
+    header = (
+        f"Instance details (index {instance_idx} from main dataset):"
+        if not test_sample_path
+        else f"Instance details (test sample from file: {test_sample_path}):"
+    )
+    # build the message lines, then join
+    lines = [header, instance_details]
     if pred_label is not None:
-        prompt_content += f"- Predicted label: {pred_label}\n"
+        lines.append(f"Predicted label: {pred_label}")
     if actual_label is not None:
-        prompt_content += f"- Actual label: {actual_label}\n"
-    prompt_content += f"\n\n{method.upper()} explanation:\n{generate_explanation_text(method, explanation_result)}"
-    return prompt_content
-    # return (
-    #     f"Instance {instance_idx}:\n"
-    #     f"- Predicted label: {pred_label}\n"
-    #     f"- Actual label: {actual_label}\n"
-    #     f"- Original instance values:\n{instance_details}\n\n"
-    #     f"Explanation:\n"
-    #     f"{generate_explanation_text(method, explanation_result)}"
-    # )
+        lines.append(f"Actual label: {actual_label}")
+
+    lines.append("")
+    lines.append(f"{method.upper()} explanation:")
+    lines.append(generate_explanation_text(method, explanation_result))
+
+    return "\n".join(lines)
 
 
 def generate_explanation_text(method, explanation_result):
-    # This function formats the XAI explanation result into a human-readable string
+    """
+    generate_explanation_text function formats the XAI explanation result into a human-readable string.
+    """
+
     if method in ["shap", "lime"]:
         return "\n".join(
             f"{feature}: {float(importance):.3f}"

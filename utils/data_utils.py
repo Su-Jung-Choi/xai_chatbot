@@ -1,15 +1,15 @@
 # utils/data_utils.py
+# this script includes functions the LLM can execute.
+
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 import matplotlib.pyplot as plt
-import io
-import base64
 
 
 def get_dataset_description(df: pd.DataFrame, label_col: Optional[str] = None) -> str:
     """
-    Generate a plain-text description of the dataset including
+    get_dataset_description function is to generate a plain-text description of the dataset including
     column names, data types, and unique label values (if label_col provided).
     """
     if df is None or len(df) == 0:
@@ -33,7 +33,7 @@ def get_basic_stats(
     df: pd.DataFrame, columns: Optional[List[str]] = None
 ) -> pd.DataFrame:
     """
-    Get basic statistics for all numeric columns or specified ones.
+    get_basic_stats function is to get basic statistics (mean, median, mode, min, max, std) for all numeric columns or specified ones.
     """
     if df is None or len(df) == 0:
         return pd.DataFrame({"info": ["No data loaded."]})
@@ -58,7 +58,7 @@ def get_basic_stats(
 
 def get_table_sample(df: pd.DataFrame, num_rows: int = 5) -> str:
     """
-    Returns the first n rows of the DataFrame as a markdown-formatted table.
+    get_table_sample function is to return the first n rows of the DataFrame as a markdown-formatted table (right now it returns the first 5 rows by default).
     """
     if df is None or len(df) == 0:
         return "No data loaded."
@@ -73,7 +73,7 @@ def plot_feature_distribution(
     df: pd.DataFrame, feature: str, bins: int = 10
 ) -> plt.Figure:
     """
-    Generate a histogram of the specified feature's distribution and return it as a base64-encoded PNG image.
+    plot_feature_distribution function is to generate a histogram of the specified feature's distribution.
     """
     if df is None or feature not in df.columns:
         raise ValueError(f"Feature '{feature}' not found in DataFrame.")
@@ -92,6 +92,5 @@ def plot_feature_distribution(
         ax.set_xlabel(feature)
         ax.set_ylabel("Count")
 
-    # NOTE: i am testing here to debug using the matplotlib figure directly
     plt.tight_layout()
     return fig

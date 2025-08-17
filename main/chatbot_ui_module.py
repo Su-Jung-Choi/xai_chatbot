@@ -1,17 +1,11 @@
 # main/chatbot_ui_module.py
-
-
 import gradio as gr
 import pandas as pd
 from dotenv import load_dotenv
 import os
-from PIL import Image
-import io
-import base64
 
 from main.chat_handler import handle_user_input
 from myapp.llm_interface import LLMInterface
-from myapp.explanation_engine import ExplanationEngine
 
 # --- Load LLM API Key ---
 load_dotenv(dotenv_path="env/credentials.env")
@@ -21,9 +15,12 @@ if not DEEPSEEK_API_KEY:
 llm_client = LLMInterface(api_key=DEEPSEEK_API_KEY)
 
 
-# --- State Storage for Session ---
 def get_default_state():
-    # Holds: df, label_column, model, explainer, X_train, X_test, y_train, y_test, feature_names, class_names, categorical_features, history
+    """
+    get_default_state function initializes the default state for a new session.
+    It holds the following keys: df, label_column, model, explainer, X_train, X_test, y_train, y_test, feature_names, class_names, categorical_features, history.
+    """
+
     return {
         "df": None,
         "label_column": None,
@@ -40,10 +37,12 @@ def get_default_state():
     }
 
 
-# --- File Upload Handler ---
 def upload_file_handler(file_path, state, history):
+    """
+    upload_file_handler function handles the file upload and initializes the state.
+    """
     # NOTE: the history variable is not directly used here, but it needs to be passed for Gradio wiring
-    # because to set chatbot as an output, it needs to be included in both input and output
+    # because to set chatbot as an output, the history needs to be included in both input and output
     try:
         df = pd.read_csv(file_path)
         state["df"] = df
@@ -87,8 +86,11 @@ def upload_file_handler(file_path, state, history):
         )
 
 
-# --- Label Column Handler ---
 def label_column_handler(label_name, state, history):
+    """
+    label_column_handler function sets the label column for the current session.
+    It updates the state with the selected label column and encodes categorical features.
+    """
     df = state.get("df")
     if df is None:
         history.append(
@@ -111,6 +113,7 @@ def label_column_handler(label_name, state, history):
     y = df[label_name]
     # Identify categorical columns
     cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
+
     # one-hot encode
     X_encoded = pd.get_dummies(X, columns=cat_cols).astype(float)
     print(X_encoded.dtypes)
@@ -129,14 +132,10 @@ def label_column_handler(label_name, state, history):
     return "", history, None
 
 
-def decode_base64_to_pil(img_base64):
-    img_bytes = base64.b64decode(img_base64)
-    img = Image.open(io.BytesIO(img_bytes))
-    return img
-
-
-# --- Chat Interface Handler ---
 def chat_interface(user_input, history, state):
+    """
+    chat_interface function handles user input and manages the chat state.
+    """
     df = state.get("df")
     label_column = state.get("label_column")
     model = state.get("model")
@@ -147,7 +146,7 @@ def chat_interface(user_input, history, state):
     y_test = state.get("y_test")
     history = state.get("history", [])
 
-    # Block all queries until CSV + label are set
+    # Block all queries until CSV file upload + label selection are set
     if df is None:
         history.append(
             {"role": "assistant", "content": "Please upload a CSV file first."}
@@ -164,10 +163,6 @@ def chat_interface(user_input, history, state):
         )
 
         return "", history, None
-
-    # --- NOTE: Dynamic Model/Explainer Sync Logic ---
-    # If model or explainer is missing, certain actions are not allowed (e.g., XAI methods)
-    # The chat_handler itself should raise "Please train or load a model first" for those cases
 
     # Route to chat_handler, pass only what is needed.
     response, fig_or_img = handle_user_input(
@@ -199,8 +194,10 @@ def chat_interface(user_input, history, state):
         return "", history, None
 
 
-# --- Gradio UI ---
 def start_ui():
+    """
+    start_ui function initializes and launches the Gradio UI for the chatbot.
+    """
     with gr.Blocks() as demo:
         gr.Markdown("# ExplainMyModel Chatbot")
         state = gr.State(get_default_state())
@@ -209,7 +206,7 @@ def start_ui():
         label_dropdown = gr.Dropdown(
             label="Select label column (target variable)", choices=[], interactive=False
         )
-        # label_box = gr.Textbox(label="Enter label column name (target variable)")
+
         chatbot = gr.Chatbot(type="messages")
         msg = gr.Textbox(label="Ask a question about your data or model")
         plot_output = gr.Plot(label="Plot or Distribution Output")

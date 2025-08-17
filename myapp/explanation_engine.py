@@ -1,4 +1,4 @@
-# currently this is only compatible using the models with encoded datasets and without pipelines
+# NOTE: currently this is only compatible using the classification models with encoded datasets and without pipelines
 # myapp/explanation_engine.py
 
 import numpy as np
@@ -41,7 +41,9 @@ class ExplanationEngine:
         self._try_initialize_explainers()
 
     def _try_initialize_explainers(self):
-        """Set up LIME, SHAP, and DiCE explainers if all required fields are present."""
+        """
+        Set up LIME, SHAP, and DiCE explainers if all required fields are present.
+        """
         # Check prerequisites
         if (
             self.model is not None
@@ -71,19 +73,14 @@ class ExplanationEngine:
 
             try:
                 # DiCE
-                # print("DiCE: self.X type:", type(self.X))
-                # print("DiCE: self.X columns:", getattr(self.X, "columns", None))
-                # print("DiCE: self.y type:", type(self.y))
                 df_for_dice = self.X.copy()
                 df_for_dice["target"] = self.y.values
-                # print("dice dataframe type: ", type(df_for_dice))
-                # print("dice dataframe head: ", df_for_dice.head())
 
                 continuous_features = [
                     name
                     for idx, name in enumerate(self.feature_names)
                     if idx
-                    not in self.categorical_features  # NOTE: should be a list of column indices for categorical features (as in the original, pre-one-hot DataFrame)
+                    not in self.categorical_features  # NOTE: this should be a list of column indices for categorical features (as in the original DataFrame before one-hot encoding)
                 ]
                 self.dice_data = dice_ml.Data(
                     dataframe=df_for_dice,
@@ -97,8 +94,8 @@ class ExplanationEngine:
 
     def update(self, model, X, y, feature_names, categorical_features, class_names):
         """
-        Update the engine with a new model and/or data.
-        Use when user trains a new model or uploads new data.
+        update method is to update the engine with a new model and/or data.
+        This is used when user trains a new model or uploads new data.
         """
         self.model = model
         self.X = X
@@ -111,6 +108,10 @@ class ExplanationEngine:
     def explain_with_lime(
         self, instance_idx: int, num_features: int = 5
     ) -> List[Tuple[str, float]]:
+        """
+        explain_with_lime method is to generate explanations for a specific instance within the given dataset using LIME.
+        """
+
         if self.lime_explainer is None:
             raise RuntimeError(
                 "LIME explainer not initialized. Please train or load a model first."
@@ -126,12 +127,17 @@ class ExplanationEngine:
     def explain_with_shap(
         self, instance_idx: int, class_idx: Optional[int] = None
     ) -> List[Tuple[str, float]]:
+        """
+        explain_with_shap method is to generate explanations for a specific instance within the given dataset using SHAP.
+        """
+
         if self.shap_explainer is None:
             raise RuntimeError(
                 "SHAP explainer not initialized. Please train or load a model first."
             )
         instance = self.X.iloc[[instance_idx]].astype(np.float64)
         shap_values = self.shap_explainer(instance)
+
         # Multi-class or binary handling
         if hasattr(shap_values, "values"):
             vals = None
@@ -152,9 +158,61 @@ class ExplanationEngine:
         else:
             raise RuntimeError("Could not interpret SHAP values.")
 
+    def explain_with_shap_row(
+        self,
+        row,  # np.ndarray shape (n_features,) or (1, n_features) or 1-row DataFrame
+        class_idx: Optional[int] = None,
+        feature_names: Optional[list] = None,
+    ):
+        """
+        explain_with_shap_row method is to generate explanations for a specific row provided by the user using SHAP.
+        The file must be in the test_set folder. The columns must match the training set and it is expected to have only one row in the test set.
+        """
+        if self.shap_explainer is None:
+            raise RuntimeError(
+                "SHAP explainer not initialized. Please train or load a model first."
+            )
+
+        # Normalize row to a 1-row DataFrame with the same columns as training
+        if isinstance(row, np.ndarray):
+            row = row.reshape(1, -1)
+            row_df = pd.DataFrame(row, columns=self.X.columns)
+        elif isinstance(row, pd.DataFrame):
+            assert row.shape[0] == 1, "row must be a single row DataFrame"
+            # ensure same order/columns as training
+            row_df = row.reindex(columns=self.X.columns)
+        else:
+            raise TypeError(f"Unsupported row type: {type(row)}")
+
+        row_df = row_df.astype(np.float64)
+
+        expl = self.shap_explainer(row_df)
+
+        if hasattr(expl, "values"):
+            vals = expl.values
+            if vals.ndim == 1:  # (n_features,)
+                flat = vals
+            elif vals.ndim == 2:  # (1, n_features)
+                flat = vals[0]
+            elif vals.ndim == 3:  # (1, n_features, n_classes)
+                if class_idx is None:
+                    proba = self.model.predict_proba(row_df)[0]
+                    class_idx = int(np.argmax(proba))
+                flat = vals[0, :, class_idx]
+            else:
+                raise RuntimeError("Unexpected SHAP values shape.")
+            flat = np.asarray(flat).flatten()
+            names = feature_names if feature_names is not None else list(self.X.columns)
+            return list(zip(names, flat))
+        else:
+            raise RuntimeError("Could not interpret SHAP values.")
+
     def generate_counterfactuals(
         self, instance_idx: int, total_CFs: int = 3
     ) -> pd.DataFrame:
+        """
+        generate_counterfactuals method is to generate counterfactual explanations for a specific instance within the given dataset using DiCE.
+        """
         if self.dice is None:
             raise RuntimeError(
                 "DiCE explainer not initialized. Please train or load a model first."
@@ -169,13 +227,7 @@ class ExplanationEngine:
             0 <= instance_idx < len(self.X)
         ), f"instance_idx out of range: {instance_idx}"
 
-        # query_instance = self.X.iloc[instance_idx].to_dict()
         query_instance = self.X.iloc[[instance_idx]]
-
-        # debugging purpose
-        # print("self.X must be dataframe: ", self.X)
-        # print("instance_idx: ", instance_idx)
-        # print("query_instance: ", query_instance)
 
         explanation = self.dice.generate_counterfactuals(
             query_instance, total_CFs=total_CFs
@@ -184,7 +236,7 @@ class ExplanationEngine:
 
     def explain(self, method: str, instance_idx: int, **kwargs):
         """
-        General dispatcher: call correct XAI method.
+        explain method is to call the appropriate XAI method.
         """
         if method.lower() == "lime":
             return self.explain_with_lime(instance_idx, **kwargs)

@@ -8,7 +8,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.naive_bayes import GaussianNB
 import numpy as np
 import pandas as pd
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Dict, Optional
 import matplotlib.pyplot as plt
 from sklearn.metrics import (
     accuracy_score,
@@ -25,13 +25,70 @@ from sklearn.preprocessing import LabelBinarizer
 MODEL_DIR = "models"
 
 
+def _project_root():
+    """
+    Get the project root directory.
+    """
+    # two directories up from this file
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def resolve_to_abs_path(path_like: str) -> str:
+    """
+    Resolve a relative path to an absolute path to the project root.
+    """
+    if os.path.isabs(path_like):
+        return path_like
+    return os.path.join(_project_root(), path_like)
+
+
+def load_and_prepare_external_sample(
+    test_sample_path: str, training_columns: list, label_column: str | None = None
+):
+    """
+    load_and_prepare_external_sample function is to load and prepare an external test sample for evaluation,
+    when user provided a test set in the test_set directory. It is expected to be a CSV file format.
+    """
+    abs_path = resolve_to_abs_path(test_sample_path)
+    print("Loading test sample from: ", abs_path)
+    test_row = pd.read_csv(abs_path)
+    if test_row.shape[0] != 1:
+        raise ValueError(
+            f"Test sample must contain exactly one row. Found {test_row.shape[0]} rows."
+        )
+
+    if label_column and label_column in test_row.columns:
+        test_row = test_row.drop(columns=[label_column])
+
+    # one-hot encode categorical features
+    cat_cols = [
+        c
+        for c in test_row.columns
+        if test_row[c].dtype == "object"
+        or str(test_row[c].dtype).startswith(("category", "string"))
+    ]
+    encoded = pd.get_dummies(test_row, columns=cat_cols)
+
+    # align to training schema and ensure the dtypes to be float64
+    encoded = encoded.reindex(columns=training_columns, fill_value=0).astype("float64")
+
+    # contiguous numpy row for SHAP/LIME
+    encoded_np = np.ascontiguousarray(encoded.values, dtype=np.float64)
+
+    return test_row, encoded, encoded_np
+
+
 def ensure_model_dir():
+    """
+    Ensure the model directory exists. This function is called in train_model and list_models functions.
+    """
     os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 def train_model(X_train, y_train, model_type: str, label_column: str, save=True):
     """
-    Train and save a classification model. Assumes X_train is fully encoded.
+    train_model function is to train and save a classification model. It assumes X_train is fully encoded.
+    NOTE: Other model types can be added here.
     """
     ensure_model_dir()
     if model_type == "knn":
@@ -73,6 +130,9 @@ def get_model_info(model_type: str, label_column: str) -> Optional[str]:
 
 
 def delete_model(model_type: str, label_column: str) -> bool:
+    """
+    Delete a trained model by type and label column.
+    """
     filename = f"{MODEL_DIR}/{model_type.lower()}_{label_column}.pkl"
     if os.path.exists(filename):
         os.remove(filename)
@@ -82,7 +142,7 @@ def delete_model(model_type: str, label_column: str) -> bool:
 
 def list_models():
     """
-    List all saved models.
+    List all saved models in the directory.
     """
     ensure_model_dir()
     return [f for f in os.listdir(MODEL_DIR) if f.endswith(".pkl")]
@@ -90,7 +150,7 @@ def list_models():
 
 def evaluate_model(model, X_test: pd.DataFrame, y_test: pd.Series) -> Dict[str, float]:
     """
-    Compute and return core classification metrics.
+    evaluate_model function is to compute and return core classification metrics.
     """
     y_pred = model.predict(X_test)
     results = {
@@ -129,27 +189,28 @@ def predict_instance_label(
     training_columns: list = None,
 ):
     """
-    Predict the label for a specific instance or from a test sample file.
-    Return formatted string with prediction, actual label, and instance details.
+    Predict the label for either:
+      - a specific instance by index from the main dataset, OR
+      - a one-row CSV provided by the user in test_set/.
+
+    Returns a formatted string with prediction (and actual label if available).
     """
     if test_sample_path is not None:
-        test_df = pd.read_csv(test_sample_path)
-        if test_df.shape[0] != 1:
-            return f"Test sample must contain exactly one row. Found {test_df.shape[0]} rows."
-        # drop label column if it exists
-        if label_column and label_column in test_df.columns:
-            test_df = test_df.drop(columns=[label_column])
-        # one-hot encode to match training columns
-        cat_cols = [
-            c
-            for c in test_df.columns
-            if test_df[c].dtype == "object" or test_df[c].dtype.name == "category"
-        ]
-        test_encoded = pd.get_dummies(test_df, columns=cat_cols)
-        test_encoded = test_encoded.reindex(columns=training_columns, fill_value=0)
-        pred_label = model.predict(test_encoded)[0]
+
+        # align to training schema
+        if training_columns is None:
+            return "Internal error: training_columns was not provided."
+
+        try:
+            test_row, encoded_df, _ = load_and_prepare_external_sample(
+                test_sample_path, training_columns, label_column
+            )
+        except Exception as e:
+            return f"Could not process test sample: {e}"
+
+        pred_label = model.predict(encoded_df)[0]
         instance_details = "\n".join(
-            f"{col}: {val}" for col, val in test_df.iloc[0].items()
+            f"{col}: {val}" for col, val in test_row.iloc[0].items()
         )
         return (
             f"Prediction for the user given test sample in {test_sample_path}:\n"
@@ -157,7 +218,11 @@ def predict_instance_label(
             f"- Input values:\n{instance_details}"
         )
 
+    # Predict for a specific index in the main dataset
     elif instance_idx is not None:
+        if instance_idx < 0 or instance_idx >= len(X_encoded):
+            return f"Please provide a valid instance index (0 - {len(X_encoded) - 1})."
+
         # get encoded features
         instance_features = X_encoded.iloc[instance_idx]
         # model prediction (this will work only if the model has .predict method)
