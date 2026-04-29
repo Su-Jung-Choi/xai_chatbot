@@ -104,3 +104,6 @@ Watch the following demo of the chatbot in action, showing how it responds to us
 
 https://github.com/user-attachments/assets/1da91933-e7e3-4e82-bc6c-274ed31eff90
 
+
+## Contributors
+Sujung Choi and Rahul Dubey
